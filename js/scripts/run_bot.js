@@ -3,4 +3,4 @@ const secrets = require("../classes/secrets.js");
 
 const MCATBot = new Bot(secrets.queries);
 
-MCATBot.search(true);
+MCATBot.search(false);
