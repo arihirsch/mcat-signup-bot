@@ -18,11 +18,11 @@ class Query {
     this.centers = centers;
     this.text_phones = text_phones;
     this.call_phones = call_phones;
-    this.time = Date.now();
+    this.time = new Date();
   }
 
   updateNotification() {
-    this.time = Date.now();
+    this.time = new Date();
   }
 }
 

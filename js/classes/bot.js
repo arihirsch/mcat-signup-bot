@@ -1,7 +1,7 @@
-import Query from "../classes/query.js";
+const Query = require("../classes/query.js");
 
 const puppeteer = require("puppeteer");
-const secrets = require("../secrets.js");
+const secrets = require("./secrets.js");
 
 const accountSid = secrets.TWILIO_ACCOUNT_SID;
 const authToken = secrets.TWILIO_AUTH_TOKEN;
@@ -19,7 +19,7 @@ class Bot {
    */
   constructor(queries) {
     this.queries = queries;
-    this.months = ["April", "May", "June", "July", "August", "September"];
+    this.months = ["January", "February", "March", "April", "May", "June", "July", "August", "September"];
     this.masterPhone = secrets.my_phone;
   }
 
@@ -36,11 +36,18 @@ class Bot {
       this.browser = await puppeteer.launch({ headless: false });
     } else {
       this.browser = await puppeteer.launch({
-        executablePath: "/snap/bin/chromium",
-        args: ["--proxy-server='direct://'", "--proxy-bypass-list=*"],
-        timeout: 120_000,
+        headless: "old",
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--single-process",
+          "--disable-features=site-per-process",
+          "--disable-gpu"
+        ],
       });
     }
+    console.log("browser launched")
     this.page = await this.browser.newPage();
 
     // if on EC2 instance, give more wiggle room w/ timeout
@@ -56,6 +63,7 @@ class Bot {
       this.page.waitForSelector('button[id="login-btn"]'),
       timeout(2_000),
     ]);
+    console.log("navigated to login page successfully");
     await this.page.type('input[name="IDToken1"]', secrets.username);
     await this.page.type('input[name="IDToken2"]', secrets.password);
     await Promise.all([
@@ -65,6 +73,7 @@ class Bot {
     await this.page.waitForSelector(
       "mat-card-actions button span.mat-button-wrapper"
     );
+    console.log("logged in successfully");
 
     // go to mcat signup url, click through to schedule query
     await this.page.evaluate(() => {
@@ -87,9 +96,10 @@ class Bot {
       this.page.waitForSelector('input[id="addressSearch"]'),
       timeout(3_500),
     ]);
+    console.log("navigated to schedule page successfully");
 
     // keep looping and selecting different dates
-    await this.loopSearch(0);
+    await this.loopSearch();
   };
 
   /**
@@ -98,20 +108,27 @@ class Bot {
    */
   searchSpecificQuery = async (query) => {
     // fill in address
+    console.log("starting search query")
     await this.page.$eval(
       'input[name="testCentersNearAddress"]',
       (el, address) => (el.value = address),
       query.address
     );
+    console.log("filled in address successfully")
 
     // fill in date
     await this.fillInDate(query);
 
-    // navigate
-    await Promise.all([
-      this.page.click("input#addressSearch"),
-      this.page.waitForNavigation(),
-    ]);
+    console.log("filled in date successfully");
+
+    await this.page.click("input#addressSearch")
+    try {
+      await this.page.waitForNavigation()
+    } catch (e) {
+      console.log("error waiting for navigation, trying again");
+      await this.page.click("input#addressSearch")
+      await this.page.waitForNavigation()
+    }
 
     await Promise.all([
       this.page.waitForSelector(`tbody tr td.searchByDateApptCol span`),
@@ -122,8 +139,19 @@ class Bot {
   };
 
   fillInDate = async (query) => {
+    await sleep(3_000);
+    console.log("slept for 3 seconds")
+    // console.log(await this.page.content())
     await this.page.click('img[id="calendarIcon"]');
-    await this.page.waitForSelector("span.ui-datepicker-month");
+    console.log("clicked calendar icon successfully");
+    try {
+      await this.page.waitForSelector("span.ui-datepicker-month");
+    } catch (e) {
+      console.log("error waiting for month selector, trying again");
+      await this.page.click('img[id="calendarIcon"]');
+      await this.page.waitForSelector("span.ui-datepicker-month");
+    }
+    console.log("found month selector successfully")
     const targetMonthInd = this.months.indexOf(query.month);
     const monthElt = await this.page.$("span.ui-datepicker-month");
     const currMonth = await monthElt.evaluate((el) => el.textContent);
@@ -155,6 +183,7 @@ class Bot {
    */
   checkWorking = async (query, iterations) => {
     await this.searchSpecificQuery(query);
+    console.log("searched for query successfully, check working function");
     const available = await this.isSpecificCenterAvailable(query.centers[0]);
     for (const phone of query.text_phones) {
       text(
@@ -173,11 +202,13 @@ class Bot {
    */
   isSpecificCenterAvailable = async (index) => {
     const isAvailable = await this.page.evaluate((i) => {
-      const arr = Array.from(
+      const fullArr = Array.from(
         document.querySelectorAll(
           `tr#testCenter_${i} td.searchByDateApptCol span`
         )
-      ).slice(1);
+      )
+      console.log("full arr", fullArr);
+      const arr = fullArr.slice(1);
 
       for (let i = 0; i < arr.length; i++) {
         const elt = arr[i];
@@ -193,44 +224,52 @@ class Bot {
   /**
    * Keeps searching for bot's location and dates, for centers.
    * Texts and calls the bot's phone number if one is available.
-   * @param {int} counter How many times this loop has iterated.
    */
-  loopSearch = async (counter) => {
-    for (const query of this.queries) {
-      // if already notified within last 60 seconds, don't search again
-      const currTime = Date.now();
-      if (this.getTimeDifferenceInSeconds(currTime, query.time) < 60) {
-        continue;
-      }
-
-      await this.searchSpecificQuery(query);
-      for (const center of query.centers) {
-        const isAvailable = await this.isSpecificCenterAvailable(center);
-        if (isAvailable) {
-          for (const phone of query.text_phones) {
-            text(
-              `There are appointments available with search location ${query.address} and search date ${query.date} for test center ${center}.`,
-              phone
-            );
-          }
-          for (const phone of query.call_phones) {
-            call(phone);
+  loopSearch = async () => {
+    let iterations = 0
+    while (true) {
+      for (const query of this.queries) {
+        // if already notified within last 60 seconds, don't search again
+        const currTime = new Date();
+        if (this.getTimeDifferenceInSeconds(currTime, query.time) < 60) {
+          console.log("already notified within last 60 seconds")
+          continue;
+        }
+  
+        await this.searchSpecificQuery(query);
+        console.log("searched for query successfully");
+        for (const center of query.centers) {
+          const isAvailable = await this.isSpecificCenterAvailable(center);
+          if (isAvailable) {
+            for (const phone of query.text_phones) {
+              text(
+                `There are appointments available with search location ${query.address} and search date ${query.date} for test center ${center}.`,
+                phone
+              );
+              query.updateNotification()
+            }
+            for (const phone of query.call_phones) {
+              call(phone);
+              query.updateNotification()
+            }
           }
         }
       }
-    }
-
-    // every 8,000 loops, do a test to ensure that it's working
-    if (counter % 8_000 === 0) {
-      for (const query of this.queries) {
-        await this.checkWorking(query);
+  
+      // every 8,000 loops, do a test to ensure that it's working
+      if (iterations % 8_000 === 0) {
+        for (const query of this.queries) {
+          await this.checkWorking(query);
+        }
       }
+  
+      // re-call this function in two seconds
+      // setTimeout(() => {
+      //   this.loopSearch(counter + 1);
+      // }, 30_000);
+      await sleep(30_000);
+      iterations += 1
     }
-
-    // re-call this function in two seconds
-    setTimeout(() => {
-      this.loopSearch(counter + 1);
-    }, 2_000);
   };
 
   /**
@@ -281,5 +320,9 @@ const call = (number) => {
     to: number,
   });
 };
+
+const sleep = (ms) => {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 module.exports = Bot;
