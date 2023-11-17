@@ -6,6 +6,7 @@ const secrets = require("./secrets.js");
 const accountSid = secrets.TWILIO_ACCOUNT_SID;
 const authToken = secrets.TWILIO_AUTH_TOKEN;
 const client = require("twilio")(accountSid, authToken);
+require('log-timestamp')
 
 const login_url = "https://mcat.aamc.org/mrs/#/";
 
@@ -241,6 +242,7 @@ class Bot {
         for (const center of query.centers) {
           const isAvailable = await this.isSpecificCenterAvailable(center);
           if (isAvailable) {
+            console.log("found available center")
             for (const phone of query.text_phones) {
               text(
                 `There are appointments available with search location ${query.address} and search date ${query.date} for test center ${center}.`,
